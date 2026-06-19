@@ -1,0 +1,64 @@
+HELM-480: Helm API returns unexpected status codes for expected and handled errors
+
+Description:
+When opening a helm release details page for a non-existing helm release the page never stops loading. This will be fixed with https://redhat.atlassian.net/browse/OCPBUGS-7692#icft=OCPBUGS-7692 / PR https://github.com/openshift/console/pull/12578
+
+But the error page still shows a confusing error instead of a 404 Not found page.
+
+Error Loading: Failed to find helm release: release: not found
+Please (link) try again.
+
+The reason for this generic error is that the console frontend handles network errors in a shared component. See:
+
+https://github.com/openshift/console/blob/master/frontend/public/components/utils/status-box.tsx#L160-L171
+
+Version-Release number of selected component (if applicable):
+4.13, earlier versions as well
+
+How reproducible:
+Always
+
+Steps to Reproduce:
+
+Open the browser network inspector
+
+Open a helm chart details page
+
+And change the namespace or helm release name into a name that doesn't exist
+
+On a local bridge without auth, you can also just open the API directly:
+
+http://localhost:9000/api/helm/release?ns=asd&name=dotnet
+
+Actual results:
+It returns a 502 Bad Gateway with some JSON:
+
+{"error":"Failed to find helm release: release: not found"}
+
+
+Additional info:
+The helm handler (in pkg/helm/handlers/handlers.go) uses http.StatusBadGateway a lot, also in cases where the client send invalid requests, like in HandleHelmInstall:
+
+func (h *helmHandlers) HandleHelmInstall(user *auth.User, w http.ResponseWriter, r *http.Request) {
+	var req HelmRequest
+
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		serverutils.SendResponse(w, http.StatusBadGateway, serverutils.ApiError{Err: fmt.Sprintf("Failed to parse request: %v", err)})
+		return
+	}
+
+It would be great to check all serverutils.SendResponse and w.WriteHeader  calls if we could return more valid status codes.
+
+
+
+Acceptance Criteria:
+- In the case that it doesn't found a release it should return a 404 Not Found (the json is fine)
+
+Technical Details:
+- Would expect/recommend something like:
+
+    400 = All expected errors (invalid request data, as well as helm installation failed as this is mostly a helm chart-related issue or?)
+    404 = Resources not found
+    405 = Method not allowed, just in this case
+    500 = (Really) Unexpected error
