@@ -150,19 +150,19 @@ def create_implementation_plan(
     2. Analyze JIRA requirements
     3. Create a structured plan
 
-    For this example, we'll create a template plan for HELM-480.
+    For this example, we'll create a template plan.
     """
 
     # Parse the JIRA to extract key information
-    is_status_code_issue = "status code" in jira_text.lower() or "statuscode" in jira_text.lower()
-    is_error_handling = "error" in jira_text.lower()
+    is_timeout_feature = "timeout" in jira_text.lower()
+    is_configuration = "config" in jira_text.lower() or "configuration" in jira_text.lower()
 
     # Extract relevant struct names from the Pydantic models
     relevant_structs = extract_struct_names(pydantic_models_content)
 
     # Create the plan
-    if is_status_code_issue and is_error_handling:
-        plan = create_status_code_fix_plan(jira_issue_key, jira_text, relevant_structs)
+    if is_timeout_feature:
+        plan = create_timeout_feature_plan(jira_issue_key, jira_text, relevant_structs)
     else:
         plan = create_generic_plan(jira_issue_key, jira_text, relevant_structs)
 
@@ -197,111 +197,120 @@ def extract_struct_names(pydantic_content: str) -> List[Dict]:
     return structs
 
 
-def create_status_code_fix_plan(
+def create_timeout_feature_plan(
     jira_key: str,
     jira_text: str,
     relevant_structs: List[Dict]
 ) -> ImplementationPlan:
-    """Create plan for fixing HTTP status codes (HELM-480 example)."""
+    """Create plan for adding timeout configuration feature."""
 
-    # Find the handlers file
+    # Find the relevant files
+    request_file = "pkg/helm/handlers/request.go"
     handlers_file = "pkg/helm/handlers/handlers.go"
 
     tasks = [
         AtomicTask(
             task_id="task_1",
-            file_path=handlers_file,
+            file_path=request_file,
             operation="edit",
-            description="Update HandleHelmInstall to return 400 for invalid request body",
-            rationale="JIRA AC: Return proper status codes. Invalid request = 400 Bad Request, not 502",
-            old_code="""serverutils.SendResponse(w, http.StatusBadGateway, serverutils.ApiError{Err: fmt.Sprintf("Failed to parse request: %v", err)})""",
-            new_code="""serverutils.SendResponse(w, http.StatusBadRequest, serverutils.ApiError{Err: fmt.Sprintf("Failed to parse request: %v", err)})""",
+            description="Add Timeout field to HelmRequest struct",
+            rationale="JIRA AC: Allow users to specify custom timeout values",
+            old_code="""type HelmRequest struct {
+    Name      string `json:"name"`
+    Namespace string `json:"namespace"`
+    ChartURL  string `json:"chartUrl"`
+}""",
+            new_code="""type HelmRequest struct {
+    Name      string `json:"name"`
+    Namespace string `json:"namespace"`
+    ChartURL  string `json:"chartUrl"`
+    Timeout   int    `json:"timeout,omitempty"` // Timeout in seconds (default: 300)
+}""",
             depends_on=[],
-            success_criteria="HandleHelmInstall returns 400 when request body is invalid",
-            affected_structs=["HelmRequest", "helmHandlers"]
+            success_criteria="HelmRequest struct has Timeout field with proper JSON tag",
+            affected_structs=["HelmRequest"]
         ),
         AtomicTask(
             task_id="task_2",
             file_path=handlers_file,
             operation="edit",
-            description="Update HandleGetRelease to return 404 for release not found",
-            rationale="JIRA AC: Return 404 when release doesn't exist, not 502",
-            old_code="""serverutils.SendResponse(w, http.StatusBadGateway, serverutils.ApiError{Err: fmt.Sprintf("Failed to find helm release: %v", err)})""",
-            new_code="""if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "no revision") {
-    serverutils.SendResponse(w, http.StatusNotFound, serverutils.ApiError{Err: fmt.Sprintf("Failed to find helm release: %v", err)})
-    return
-}
-serverutils.SendResponse(w, http.StatusInternalServerError, serverutils.ApiError{Err: fmt.Sprintf("Failed to get helm release: %v", err)})""",
+            description="Add timeout validation function",
+            rationale="JIRA AC: Validate timeout values are within reasonable bounds (30s - 1800s)",
+            new_code="""// validateTimeout ensures timeout is within acceptable range
+func validateTimeout(timeout int) (int, error) {
+    if timeout == 0 {
+        return 300, nil // Default 5 minutes
+    }
+    if timeout < 30 {
+        return 0, fmt.Errorf("timeout too short: minimum is 30 seconds")
+    }
+    if timeout > 1800 {
+        return 0, fmt.Errorf("timeout too long: maximum is 1800 seconds (30 minutes)")
+    }
+    return timeout, nil
+}""",
             depends_on=[],
-            success_criteria="HandleGetRelease returns 404 when release is not found",
-            affected_structs=["helmHandlers"]
+            success_criteria="Validation function correctly validates timeout range",
+            affected_structs=[]
         ),
         AtomicTask(
             task_id="task_3",
             file_path=handlers_file,
             operation="edit",
-            description="Add helper function to determine appropriate HTTP status code",
-            rationale="DRY principle: centralize status code logic",
-            new_code="""// determineErrorStatusCode returns the appropriate HTTP status code based on error type
-func determineErrorStatusCode(err error) int {
-    errMsg := err.Error()
-
-    // 404 Not Found
-    if strings.Contains(errMsg, "not found") || strings.Contains(errMsg, "no revision") {
-        return http.StatusNotFound
-    }
-
-    // 400 Bad Request - validation/parsing errors
-    if strings.Contains(errMsg, "invalid") || strings.Contains(errMsg, "parse") {
-        return http.StatusBadRequest
-    }
-
-    // 500 Internal Server Error - default for unexpected errors
-    return http.StatusInternalServerError
-}""",
-            depends_on=[],
-            success_criteria="Helper function correctly maps errors to status codes",
-            affected_structs=[]
+            description="Update HandleHelmInstall to use custom timeout",
+            rationale="JIRA AC: Use custom timeout value when installing charts",
+            old_code="""timeout := 300 // hardcoded 5 minute timeout
+client.Install(req.Name, req.ChartURL, timeout)""",
+            new_code="""timeout, err := validateTimeout(req.Timeout)
+if err != nil {
+    serverutils.SendResponse(w, http.StatusBadRequest, serverutils.ApiError{Err: err.Error()})
+    return
+}
+client.Install(req.Name, req.ChartURL, timeout)""",
+            depends_on=["task_1", "task_2"],
+            success_criteria="HandleHelmInstall accepts and validates custom timeout values",
+            affected_structs=["HelmRequest", "helmHandlers"]
         ),
         AtomicTask(
             task_id="task_4",
             file_path="pkg/helm/handlers/handlers_test.go",
             operation="edit",
-            description="Add test cases for status code handling",
-            rationale="Ensure status codes are correct and prevent regression",
-            new_code="""func TestHandleGetRelease_NotFound(t *testing.T) {
-    // Test that non-existent release returns 404
-    // ... test implementation
+            description="Add test cases for timeout handling",
+            rationale="Ensure timeout validation works correctly and prevent regression",
+            new_code="""func TestValidateTimeout(t *testing.T) {
+    // Test default timeout
+    // Test valid timeout values
+    // Test timeout too short (< 30s)
+    // Test timeout too long (> 1800s)
 }
 
-func TestHandleHelmInstall_InvalidRequest(t *testing.T) {
-    // Test that invalid request body returns 400
-    // ... test implementation
+func TestHandleHelmInstall_CustomTimeout(t *testing.T) {
+    // Test installation with custom timeout
+    // Test installation with default timeout
 }""",
             depends_on=["task_1", "task_2", "task_3"],
-            success_criteria="All status code tests pass",
+            success_criteria="All timeout tests pass",
             affected_structs=["HelmRequest"]
         )
     ]
 
     return ImplementationPlan(
-        plan_id="plan_helm480_001",
+        plan_id=f"plan_{jira_key.lower().replace('-', '_')}_001",
         jira_issue=jira_key,
         requirement=jira_text[:200] + "...",
         analysis="""
-The issue is that pkg/helm/handlers uses http.StatusBadGateway (502) for all errors,
-including client errors (invalid input) and not-found errors. According to HTTP spec:
-- 400 = Client sent invalid data
-- 404 = Resource not found
-- 500 = Server unexpected error
-- 502 = Bad Gateway (proxy/upstream issue)
+The current implementation uses a hardcoded 5-minute timeout for all Helm chart installations.
+This causes issues for:
+- Charts with complex initialization that take longer than 5 minutes
+- Quick installations that don't need to wait the full 5 minutes
 
-Current code uses 502 everywhere, which is semantically incorrect and causes the frontend
-to show a generic error instead of proper 404/400 pages.
-
-Solution: Update all error responses to use appropriate status codes based on error type.
+Solution: Add a configurable timeout field to HelmRequest with:
+1. Optional field (uses default if not specified)
+2. Validation to ensure reasonable bounds (30s - 1800s)
+3. Backend support to pass timeout to Helm client
 """,
         affected_files=[
+            request_file,
             handlers_file,
             "pkg/helm/handlers/handlers_test.go"
         ],
@@ -309,20 +318,21 @@ Solution: Update all error responses to use appropriate status codes based on er
         tasks=tasks,
         execution_order=["task_1", "task_2", "task_3", "task_4"],
         risks=[
-            "Frontend may be expecting 502 status code in error handling",
-            "Changing status codes could break existing integrations"
+            "Setting very long timeouts could tie up server resources",
+            "API clients may need updates to pass timeout values"
         ],
         mitigation_strategies=[
-            "Check frontend status-box.tsx to ensure it handles 400/404 properly",
-            "Add comprehensive tests before merging",
-            "Review all callers of SendResponse in handlers"
+            "Enforce maximum timeout of 30 minutes",
+            "Make timeout field optional with sensible default",
+            "Log timeout values for monitoring"
         ],
         test_requirements=[
-            "Unit tests for each handler with different error scenarios",
-            "Integration test: non-existent release returns 404",
-            "Integration test: invalid request body returns 400"
+            "Unit tests for timeout validation",
+            "Integration test: installation with custom timeout",
+            "Integration test: installation with default timeout",
+            "Test timeout boundary conditions (29s, 30s, 1800s, 1801s)"
         ],
-        estimated_complexity="medium",
+        estimated_complexity="low",
         requires_human_review=True
     )
 
