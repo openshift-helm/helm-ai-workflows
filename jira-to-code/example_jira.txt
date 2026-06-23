@@ -1,64 +1,34 @@
-HELM-480: Helm API returns unexpected status codes for expected and handled errors
+HELM-123: Add timeout configuration support for Helm chart installations
 
 Description:
-When opening a helm release details page for a non-existing helm release the page never stops loading. This will be fixed with https://redhat.atlassian.net/browse/OCPBUGS-7692#icft=OCPBUGS-7692 / PR https://github.com/openshift/console/pull/12578
+Currently, Helm chart installations use a hardcoded timeout value. Users need the ability to
+specify custom timeout values for long-running chart installations.
 
-But the error page still shows a confusing error instead of a 404 Not found page.
-
-Error Loading: Failed to find helm release: release: not found
-Please (link) try again.
-
-The reason for this generic error is that the console frontend handles network errors in a shared component. See:
-
-https://github.com/openshift/console/blob/master/frontend/public/components/utils/status-box.tsx#L160-L171
-
-Version-Release number of selected component (if applicable):
-4.13, earlier versions as well
-
-How reproducible:
-Always
+Problem:
+- Some charts with complex initialization scripts take longer than the default timeout
+- Users cannot customize the timeout value per installation
+- This causes installation failures for legitimate long-running deployments
 
 Steps to Reproduce:
+1. Install a Helm chart that takes more than 5 minutes to become ready
+2. Observe that the installation times out and fails
+3. No option exists to configure a longer timeout
 
-Open the browser network inspector
+Actual Results:
+Installations timeout after the default 5 minutes with no way to configure this.
 
-Open a helm chart details page
-
-And change the namespace or helm release name into a name that doesn't exist
-
-On a local bridge without auth, you can also just open the API directly:
-
-http://localhost:9000/api/helm/release?ns=asd&name=dotnet
-
-Actual results:
-It returns a 502 Bad Gateway with some JSON:
-
-{"error":"Failed to find helm release: release: not found"}
-
-
-Additional info:
-The helm handler (in pkg/helm/handlers/handlers.go) uses http.StatusBadGateway a lot, also in cases where the client send invalid requests, like in HandleHelmInstall:
-
-func (h *helmHandlers) HandleHelmInstall(user *auth.User, w http.ResponseWriter, r *http.Request) {
-	var req HelmRequest
-
-	err := json.NewDecoder(r.Body).Decode(&req)
-	if err != nil {
-		serverutils.SendResponse(w, http.StatusBadGateway, serverutils.ApiError{Err: fmt.Sprintf("Failed to parse request: %v", err)})
-		return
-	}
-
-It would be great to check all serverutils.SendResponse and w.WriteHeader  calls if we could return more valid status codes.
-
-
+Expected Results:
+Users should be able to specify a custom timeout value when installing charts.
 
 Acceptance Criteria:
-- In the case that it doesn't found a release it should return a 404 Not Found (the json is fine)
+1. Add a `timeout` field to the HelmRequest structure
+2. Update HandleHelmInstall to accept and use the custom timeout value
+3. If no timeout is specified, use the existing default (300 seconds)
+4. Validate that timeout values are within reasonable bounds (30s - 1800s)
+5. Add tests to verify custom timeout handling
 
 Technical Details:
-- Would expect/recommend something like:
-
-    400 = All expected errors (invalid request data, as well as helm installation failed as this is mostly a helm chart-related issue or?)
-    404 = Resources not found
-    405 = Method not allowed, just in this case
-    500 = (Really) Unexpected error
+- Modify the HelmRequest struct in pkg/helm/handlers/request.go
+- Update installation handler to pass timeout to Helm client
+- Add validation for timeout range
+- Update API documentation
